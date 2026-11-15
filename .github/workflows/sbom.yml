@@ -29,3 +29,33 @@ jobs:
           curl --fail-with-body -sS -X POST "$INGEST_URL/sandbox-image" \
             -H "CF-Access-Client-Id: $CLIENT_ID" -H "CF-Access-Client-Secret: $CLIENT_SECRET" \
             -H "Content-Type: application/json" --data-binary @sbom.cdx.json
+  scan:
+    # Scans the same dependency files with Trivy and pushes the JSON report (AE2c). No third-party action: after the
+    # March 2026 trivy-action compromise (GHSA-69fq-xp46-6x23) this job downloads one Trivy release and runs it only
+    # if its SHA-256 matches the digest GitHub reports for that (immutable) release asset. The scan gets no secrets.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Trivy (pinned and checked)
+        env:
+          TRIVY_VERSION: 0.76.2
+          TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          tar -xzf trivy.tar.gz trivy && rm trivy.tar.gz && ./trivy --version
+      - name: Scan the dependency files
+        run: '"$RUNNER_TEMP/trivy" fs --scanners vuln --format json --output "$RUNNER_TEMP/trivy.json" .'
+      - name: Push the report
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+          CLIENT_ID: ${{ secrets.INGEST_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.INGEST_CLIENT_SECRET }}
+        run: |
+          if [ -z "$INGEST_URL" ] || [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then echo "not configured: set INGEST_URL, INGEST_CLIENT_ID and INGEST_CLIENT_SECRET"; exit 0; fi
+          curl --fail-with-body -sS -X POST "${INGEST_URL%/v1/sbom}/v1/scan/sandbox-trivy" \
+            -H "CF-Access-Client-Id: $CLIENT_ID" -H "CF-Access-Client-Secret: $CLIENT_SECRET" \
+            -H "Content-Type: application/json" --data-binary @"$RUNNER_TEMP/trivy.json"
